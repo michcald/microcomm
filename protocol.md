@@ -163,6 +163,36 @@ Fragments are passed to the developer's callback immediately upon arrival. No re
 * **Best for**: Logs, telemetry, audio, and large file transfers.
 * **API Pattern**: `TheStack.openStream(target, serviceID)` -> Returns a `Stream` object.
 
+### Discovery & Service Mapping (Service 0x00)
+To eliminate the need for hardcoded node addresses, `microcomm` defines a standard handshake for dynamic discovery and logical binding.
+
+#### 1. Broadcast Storm Mitigation
+In large deployments where multiple nodes may initialize simultaneously (e.g., after a power failure), a "Broadcast Storm" can congest the physical medium.
+*   **Randomized Jitter**: Nodes **SHOULD** wait for a random interval (the "Startup Jitter") before initiating discovery.
+*   **Exponential Backoff**: If no server responds, the interval between subsequent discovery attempts should increase to prevent permanent channel saturation.
+
+#### 2. The Discovery Handshake
+**A. Search (Client -> Broadcast)**
+The client transmits a broadcast packet to the network to identify available services.
+*   **L3 Dest**: `0xFF` (or `0xFFFF`)
+*   **L7 Service**: `0x00`
+*   **Payload (Optional)**:
+    *   **Device Type**: A 1-byte category identifier.
+    *   **UID**: A 4-byte Unique Identifier (e.g., Chip ID or UUID) used for explicit pairing.
+
+**B. Offer (Server -> Client)**
+A server hearing a Search request may respond if it provides the requested service or matches the provided type/UID.
+*   **L3 Dest**: Unicast to the Client's source address.
+*   **L7 Service**: `0x00`
+*   **Payload**:
+    *   **Server Details**: Protocol version, capabilities bitmask, and server type.
+    *   **Target UID**: If the Client provided a UID, the Server **MUST** echo it to confirm the offer is intended for that specific hardware.
+
+**C. Association (Client Logic)**
+Upon receiving a valid Offer, the Client performs an **Association**. 
+*   The Client updates its internal routing table to map future service requests to the Server's Layer 3 address.
+*   **Persistence**: Implementations may choose to persist this mapping in non-volatile storage to reduce discovery overhead on subsequent reboots, though this is not strictly required by the protocol.
+
 ---
 
 ## Security, Safety & Session Management
