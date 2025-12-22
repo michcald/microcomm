@@ -85,9 +85,9 @@ $$P_{dev} = PHYS\_MTU - (L2_{hdr} + L3_{hdr} + L4_{ovr} + L5_{hdr} + L6_{hdr})$$
 ### Typical Benchmarks (32-byte MTU)
 | Mode | Overhead | Available Payload |
 | :--- | :--- | :--- |
-| **Minimal Wired** (No L2/L5) | 4 bytes | 28 bytes |
-| **Standard Wireless** (CRC16 + L5) | 7 bytes | 25 bytes |
-| **Secure Wireless** (AES-GCM + L5) | 23 bytes | 9 bytes |
+| **Minimal Wired** (L1-L3) | 2 bytes | 30 bytes |
+| **nRF24 Standard** (L1-L3 + L5-L6) | 5 bytes | 27 bytes |
+| **Secure Wireless** (nRF24 + AES-GCM) | 21 bytes | 11 bytes |
 
 ---
 
@@ -114,10 +114,12 @@ Provides source and destination filtering.
 ---
 
 ## Layer 4: Security Layer (Pluggable)
-Provides confidentiality and authenticity. 
-* **Customizable**: Developer-provided `encrypt()` and `decrypt()` functions.
-* **Overhead**: Any cryptographic overhead (Initialization Vectors or Auth Tags) reduces the available MTU.
-* **Context Reset**: Stateful ciphers (e.g., using rolling nonces) must be reset or re-keyed whenever a Session Lock is released to prevent sync errors.
+Provides **Confidentiality**, **Authenticity**, and **Replay Protection**.
+*   **Confidentiality**: Encrypts the payload so observers cannot read command data.
+*   **Replay Protection**: The cryptographic implementation **MUST** ensure freshness (e.g., using a Monotonic Counter, Timestamp, or Rolling Nonce) to reject recorded traffic.
+*   **Integrity**: Prevents malicious tampering (unlike L2, which only catches noise).
+*   **Warning**: Without this layer, the protocol is **Plain Text** and vulnerable to eavesdropping and command playback attacks.
+*   **Context Reset**: Stateful ciphers must be re-keyed or reset on session unlock.
 
 ---
 
@@ -163,9 +165,20 @@ Fragments are passed to the developer's callback immediately upon arrival. No re
 
 ---
 
-## Session Management & Safety
-This protocol relies on a "Single Active Session" model to minimize RAM usage. This introduces critical safety requirements:
+## Security, Safety & Session Management
+This protocol relies on a "Single Active Session" model to minimize RAM usage. This introduces critical safety requirements.
 
+### Threat Model & Defenses
+| Threat | Mitigation Layer | Mechanism |
+| :--- | :--- | :--- |
+| **Signal Noise** | **L2** (Integrity) | CRC16/32 Checksums discard corrupted bits. |
+| **Eavesdropping** | **L4** (Security) | AES/Chacha encryption hides payload content. |
+| **Replay Attack** | **L4** (Security) | Crypto Nonces/Counters reject old messages. |
+| **Tampering** | **L4** (Security) | Auth Tags (MAC) detect malicious modification. |
+| **Zombie Client** | **L7** (Session) | Watchdog Timer (Fail-Fast) unlocks the server. |
+| **Packet Loss** | **L5** (Reliability)| ACKs and Retries ensure delivery. |
+
+### Session Lifecycle Rules
 1. **Handshake**: A session begins with a `SESSION_START` packet identifying the Service and Pattern.
 2. **Locking**: The Server locks itself to the Client's address. Other clients receive a `BUSY` response.
 3. **Watchdog (Zombie Protection)**: 
@@ -180,6 +193,24 @@ This protocol relies on a "Single Active Session" model to minimize RAM usage. T
 
 **Scenario**: Client (Addr `0x01`) sends "PING" to Server (Addr `0x02`) on Service `0x00`.
 **Config**: `PHYS_MTU=32`, `L2=CRC16`, `L5=Enabled`.
+
+```mermaid
+sequenceDiagram
+    participant C as Client (0x01)
+    participant S as Server (0x02)
+
+    Note over C,S: 1. Request "PING"
+    C->>S: DATA (ID=0x15) [Req:PING]
+    activate S
+    S-->>C: ACK (ID=0x15)
+    
+    Note over S: Process PING...
+    
+    Note over C,S: 3. Response "PONG"
+    S->>C: DATA (ID=0x01) [Resp:PONG]
+    deactivate S
+    C-->>S: ACK (ID=0x01)
+```
 
 ## 1. Request (Client -> Server)
 *   **L3**: Src=`0x01`, Dst=`0x02`
