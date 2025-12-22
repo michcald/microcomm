@@ -1,4 +1,4 @@
-# MicroComm (microcomm) Protocol for Microcontrollers - Specification v3.0
+# MicroComm (microcomm) Protocol for Microcontrollers
 
 This document defines the **microcomm** protocol, a modular, hardware-agnostic communication stack specifically optimized for resource-constrained microcontrollers. It prioritizes memory efficiency (Zero-Copy), low latency, and support for both atomic transactions and continuous data streams on embedded hardware.
 
