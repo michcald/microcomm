@@ -32,11 +32,6 @@ The stack is customized at compile-time using the following parameters:
 | `SESSION_TIMEOUT`| `ms` | Time before an inactive session is forcibly unlocked (default: 2000ms). |
 | `ENDIANNESS` | `const` | **Little Endian** is mandatory for all multi-byte fields (CRC, Counters, etc.). |
 
-## 1. Reserved Services
-To facilitate discovery and network management, the following Service IDs are reserved at Layer 7:
-*   `0x00`: **Discovery / Ping**. Returns device status, type, and capabilities.
-*   `0xFF`: **System Reset / Bootloader**. (Optional) Triggers a remote reset.
-
 ---
 
 ## Detailed Packet Structure (On-the-Wire)
@@ -150,6 +145,20 @@ Handles the transport of payloads larger than the available MTU.
 
 ## Layer 7: Session & Application Layer
 The top-level developer interface. Manages exclusive access (Locking) and Service routing.
+
+### Services & Service IDs
+A **Service** represents a specific logical endpoint or functional module on a device (e.g., a "Temperature Sensor" service, a "Motor Control" service, or a "System Settings" service).
+
+The **Service ID** is a 7-bit identifier (0x00 - 0x7F) that acts as a "port number" to route incoming requests to the correct application-level handler.
+
+#### Reserved Service IDs
+To ensure interoperability, specific Service IDs are standard across the `microcomm` ecosystem:
+
+| ID | Name | Description |
+| :--- | :--- | :--- |
+| `0x00` | **Discovery** | Dynamic address resolution and capabilities exchange. |
+| `0x7F` | **System** | Remote reset, bootloader triggers, or firmware management. |
+| `0x01-0x7E` | **User Defined** | Available for custom application logic. |
 
 ### Interaction Patterns
 
