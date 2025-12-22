@@ -8,6 +8,12 @@ This document defines the **microcomm** protocol, a modular, hardware-agnostic c
 *   **Fail-Fast**: Better to drop a session quickly than to block the channel indefinitely.
 *   **Resource Priority**: Reliability > Memory Efficiency > Throughput.
 *   **Deterministic**: Behavior must be predictable even under heavy interference or load.
+*   **Memory & Buffer Ownership (Zero-Allocation)**: 
+    *   To eliminate heap usage, the **L1 Physical Driver** should pre-allocate a static "RX Buffer." 
+    *   As the packet moves up the stack (`L1 → L8`), each layer MUST receive a **pointer or slice** to the existing buffer. 
+    *   Layers MUST NOT copy data unless it is being moved to a long-term reassembly buffer (L6). 
+    *   In languages like **Go/TinyGo**, use slice re-slicing (`buf[offset:]`) to pass data between layers without triggering the garbage collector.
+
 *   **Byte Ordering**: All multi-byte fields (UIDs, Timestamps, CRCs, L6 Indices) **MUST** be transmitted in **Little-Endian** format.
 *   **Minimum MTU**: To ensure a viable payload after headers, the physical medium (L1) **SHOULD** provide a `PHYS_MTU` of at least **10 bytes**.
 
@@ -146,6 +152,7 @@ Guarantees packet delivery and ensures idempotency (prevents duplicate processin
 ## Layer 6: Fragmentation & Sequencing Layer
 Handles the transport of payloads larger than the available MTU.
 * **Header**: 2 bytes (`[Index:8bits][Control:8bits]`)
+* **Memory Allocation**: The size of the reassembly buffer is defined by the `Max Buffer Size` negotiated during Discovery. Implementations **SHOULD** pre-allocate this buffer at startup to ensure deterministic performance and prevent runtime memory exhaustion.
 * **Control Bitmask**:
     * `0x01` (**IsLast**): Set if this is the final fragment of a message or stream. Receipt of this bit signals the application to close the current data buffer or stream.
     * `0x02` (**IsStream**): Set for Continuous Streaming mode (bypasses reassembly buffer).
