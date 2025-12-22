@@ -8,6 +8,8 @@ This document defines the **microcomm** protocol, a modular, hardware-agnostic c
 *   **Fail-Fast**: Better to drop a session quickly than to block the channel indefinitely.
 *   **Resource Priority**: Reliability > Memory Efficiency > Throughput.
 *   **Deterministic**: Behavior must be predictable even under heavy interference or load.
+*   **Byte Ordering**: All multi-byte fields (UIDs, Timestamps, CRCs, L6 Indices) **MUST** be transmitted in **Little-Endian** format.
+*   **Minimum MTU**: To ensure a viable payload after headers, the physical medium (L1) **SHOULD** provide a `PHYS_MTU` of at least **10 bytes**.
 
 ## Modular Architecture (The Solid Pipe)
 **microcomm** is designed as a fixed vertical stack. Every packet logically traverses all layers (`L1 → L8`). To maintain efficiency, layers can be **Transparent (Pass-Through)**, meaning they add zero bytes of overhead to the wire and perform no logic in software for that specific packet.
@@ -82,9 +84,8 @@ The hardware-specific interface responsible for raw buffer transmission.
 *   **PHYS_MTU (Maximum Transmission Unit)**: The absolute maximum number of bytes the hardware can transmit in a single atomic burst (e.g., 32 bytes for nRF24L01, 255 for LoRa). This is the hard ceiling for the entire protocol stack.
 *   **Requirements**: Must support sending/receiving a buffer of **up to** `PHYS_MTU` in size.
 *   **Collision Avoidance (LBT)**: Mediums that do not provide hardware-level collision detection (like RS-485 or raw radio) **SHOULD** implement a "Listen-Before-Talk" (LBT) strategy. Nodes should verify the medium is idle for a few microseconds before transmitting.
-*   **Framing (Byte-Streams)**: For mediums that do not provide implicit packet boundaries (e.g., UART, RS-485), the L1 driver **MUST** implement a framing strategy to delineate packets. Recommended methods include a `[Length]` prefix or **SLIP** (Serial Line IP) encoding.
-*   **Address Mapping**: The Layer 1 driver is responsible for mapping the **Layer 3 Logical Address** to the physical medium's specific addressing scheme (e.g., nRF24 pipes, LoRa sync words, or ignoring it entirely for point-to-point Serial/UART).
-*   **Mediums**: nRF24L01, UART, LoRa, RS-485, Infrared, Laser, etc.
+*   **Framing (Byte-Streams)**: For mediums that do not provide implicit packet boundaries (e.g., UART, RS-485), the L1 driver **MUST** implement a framing strategy. 
+*   **Sync Word**: It is highly recommended to prefix every packet with a 2-byte sequence `0xAA 0x55`.
 
 ---
 
@@ -101,10 +102,11 @@ Ensures data has not been corrupted during transit.
 ## Layer 3: Addressing Layer
 Provides source and destination filtering.
 * **Header**: `[SourceAddress][DestinationAddress]`
-* **Size**: $2 \times sizeof(ADDR\_TYPE)$
+* **Address Size**: Project-wide constant (typically 1 or 2 bytes). 
+* **Endianness**: If address size is > 1 byte, addresses **MUST** be transmitted in **Little-Endian** format.
 * **Reserved Addresses**:
-    * `0x00`: **Unassigned/Controller**. Used by new nodes during discovery or as a default gateway.
-    * `0xFF` or `0xFFFF`: **Broadcast**. Targets all nodes on the network.
+    * `0x00`: **Unassigned/Controller**.
+    * `0xFF` / `0xFFFF`: **Broadcast**. Targets all nodes.
 
 ---
 
@@ -126,15 +128,18 @@ Guarantees packet delivery and ensures idempotency (prevents duplicate processin
 * **Packet Types**:
     * `00`: **DATA** - Standard payload.
     * `01`: **ACK** - Positive Acknowledgement.
-    * `10`: **NACK** - Negative Acknowledgement (e.g., CRC OK, but Buffer Full / Invalid State).
-    * `11`: **BUSY** - Receiver is locked by another session.
-* **ACK Logic**: An `ACK` is sent immediately upon valid processing. A `NACK` is sent if the packet is technically valid (CRC matches) but cannot be accepted by the upper layers.
-* **Flow Control (Stop-and-Wait)**: To support the single-buffer model of microcontrollers, `microcomm` uses a **Sequential Stop-and-Wait** mechanism. A sender **MUST NOT** transmit packet $N+1$ until it has received a valid `ACK` (or reached a timeout) for packet $N$.
-* **Idempotency (Exactly-Once Processing)**: To prevent side-effects from re-transmissions (e.g., toggling a light twice), the receiver **MUST** track the last processed `PacketID` for the current session. If a duplicate `PacketID` is received, the receiver must re-send the `ACK` but **MUST NOT** pass the payload to the application layer again.
-* **Randomized Backoff**: To prevent persistent collisions after a failure, retries **MUST** include a randomized jitter (e.g., `Base_Timeout + rand(0, 10ms)`).
-* **Backpressure**: The sender retries on timeout. If it receives `BUSY` or `NACK`, it may abort or wait depending on the policy.
-* **Head-of-Line Blocking**: To preserve channel availability, `MAX_RETRIES` should be kept low. A failed reliable transmission should terminate the L7 session immediately.
-* **Broadcast Restriction**: Reliability (ACKs) **MUST NOT** be used with Broadcast destination addresses. A broadcast packet is always "fire-and-forget" to prevent a "Broadcast ACK Storm" where every node on the network transmits simultaneously.
+    * `10`: **NACK** - Negative Acknowledgement.
+    * `11`: **BUSY** - Receiver is locked or buffer is currently being processed.
+
+**Flow Control (Stream Pause)**: During a **Streaming** interaction (L7), if a receiver is temporarily unable to accept the next fragment (e.g., waiting for a Flash page write), it `SHOULD` respond with `BUSY`. The sender MUST then wait for its retry interval and re-send the **same** fragment. This acts as a simple backpressure mechanism.
+    
+    **NACK Reason Codes**: When sending a `NACK`, the receiver `SHOULD` include a 1-byte reason code in the payload:
+    *   `0x01`: **Buffer Overflow** (Message too large for Max Buffer Size).
+    *   `0x02`: **Security Fault** (Invalid Authentication Tag or Replay detected).
+*   `0x03`: **Service Missing** (Target ServiceID is not registered).
+*   `0x04`: **State Error** (e.g., sending a fragment before a session is open).
+
+**Sequence Wrapping**: PacketIDs are 6-bit circular values. Receivers MUST handle wrapping (63 -> 0) using modulo logic to ensure accurate duplicate detection.
 
 ---
 
@@ -180,7 +185,12 @@ The final destination. Responsible for routing data to the correct functional ha
 The stack reassembles all fragments into a single buffer before notifying the application.
 *   **Best for**: Commands, settings, and small status updates.
 *   **Overflow Protection**: If a receiver detects that an incoming message will exceed its **Max Buffer Size**, it **MUST** send a `NACK` (L5) immediately to terminate the session and prevent memory corruption.
-*   **Status Codes**: The first byte of an Atomic **RESPONSE** payload `SHOULD` be a Status Code (e.g., `0x00` for Success, `0x01` for Invalid Command).
+*   **Status Codes**: The first byte of an Atomic **RESPONSE** payload `SHOULD` be a Status Code:
+    *   `0x00`: **SUCCESS** - Operation completed normally.
+    *   `0x01`: **FAILURE** - Generic application error.
+    *   `0x02`: **INVALID_DATA** - Payload format or arguments were incorrect.
+    *   `0x03`: **DENIED** - Security/Permissions error at the application level.
+    *   `0x04`: **NOT_READY** - The service is busy or initializing.
 *   **API Pattern**: `TheStack.request(target, serviceID, payload, length)`
 
 #### 2. Streaming (Continuous)
@@ -223,10 +233,11 @@ In large deployments where multiple nodes interact simultaneously, collisions ar
 *   **L3 Src**: `0x00` (Unassigned)
 *   **Payload**:
     *   **Opcode**: `0x01` (SEARCH).
+    *   **Protocol Version**: 1-byte version identifier.
     *   **Device Type**: A 1-byte category identifier.
-    *   **UID**: A 4-byte Unique Identifier.
+    *   **UID**: A 4-byte Unique Identifier. `Note: It is recommended to use the MCU's internal Silicon ID or a random value generated once at first-boot and stored in EEPROM.`
     *   **Client MTU**: The maximum buffer size of the Client.
-    *   **Required Capabilities**: A 1-byte bitmask of features the Server **MUST** support:
+    *   **Required Capabilities**: A 1-byte bitmask of features the Server **MUST** support to respond:
         *   **Bit 0**: Security (L4).
         *   **Bit 1**: Streaming (L7).
         *   **Bit 2**: Fragmentation (L6).
@@ -242,7 +253,7 @@ In large deployments where multiple nodes interact simultaneously, collisions ar
     *   **Protocol Version**: A 1-byte version identifier (e.g., `0x01`).
     *   **Heartbeat Interval**: A 1-byte value (in seconds) representing how often the node will send a "Keep-Alive". A value of `0` disables heartbeats.
     *   **Max Buffer Size**: The total RAM (in bytes) available for Atomic reassembly. Senders **MUST NOT** exceed this size for multi-fragment messages.
-    *   **Server Capabilities**: A bitmask of supported layers and features.
+    *   **Server Capabilities**: A bitmask of supported layers and features (Same bit mapping as Required Capabilities).
     *   **MTU**: The Server's maximum buffer size. The Client **MUST** use the minimum of its own MTU and the Server's MTU for this session.
     *   **Target UID**: Echoed to confirm the recipient.
 
@@ -256,8 +267,24 @@ Upon receiving an Offer, the Client **MUST** verify that the `Target UID` in the
 Once a basic association is formed, a Client may query the Server for its specific capabilities.
 *   **Request**: A `DATA` packet to Service `0x00` with payload `[Opcode:0x03]`.
 *   **Response**: A `DATA` packet with payload `[Opcode:0x04][Count:N][ServiceID_1][ServiceType_1]...`.
+*   **Standard Service Types**:
+    *   `0x01`: **Sensor** (Read-only data).
+    *   `0x02`: **Actuator** (Writeable state/control).
+    *   `0x03`: **Complex** (Stream-based data like Audio/Logs).
+    *   `0x04`: **Security** (Key exchange/Auth).
+    *   `0x7F`: **Internal** (System/Diagnostic).
 *   **Keep-Alive (Heartbeat)**: Nodes supporting heartbeats transmit a `DATA` packet to Service `0x00` with a 1-byte payload of `0xFE`. If the Hub (Client) fails to receive this for 2x the negotiated interval, the node is considered offline.
 *   **Benefit**: Allows a Hub to automatically configure a dashboard or logic for a new device without manual setup.
+
+---
+
+### Power Management Models
+`microcomm` supports two primary models for interacting with energy-constrained devices:
+
+1. **Server-Push (Always-On)**: The standard model where the Server listens indefinitely for requests. Lowest latency, but consumes the most power.
+2. **Client-Pull (Beaconing)**: Optimized for battery-powered nodes. The node (Server) sleeps, wakes up periodically, and sends a **"Ready" Beacon** to its Hub (Client).
+    *   **Implementation**: The Beacon is a `DATA` packet sent to Service `0x00` with the **HEARTBEAT (0xFE)** opcode.
+    *   **Listen Window**: After sending the beacon, the node listens for a short window (e.g., 20ms) for any pending `REQUEST` before returning to sleep. This allows for multi-year battery life at the cost of higher command latency.
 
 ---
 
