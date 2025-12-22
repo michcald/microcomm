@@ -175,13 +175,34 @@ The final destination. Responsible for routing data to the correct functional ha
 *   **IsStateful**: If `1`, the next byte is the **Layer 7 Session Header**.
 
 ### Interaction Patterns
-(Patterns moved here: Atomic, Streaming, etc.)
+
+#### 1. Atomic (Request/Response)
+The stack reassembles all fragments into a single buffer before notifying the application.
+*   **Best for**: Commands, settings, and small status updates.
+*   **Overflow Protection**: If a receiver detects that an incoming message will exceed its **Max Buffer Size**, it **MUST** send a `NACK` (L5) immediately to terminate the session and prevent memory corruption.
+*   **Status Codes**: The first byte of an Atomic **RESPONSE** payload `SHOULD` be a Status Code (e.g., `0x00` for Success, `0x01` for Invalid Command).
+*   **API Pattern**: `TheStack.request(target, serviceID, payload, length)`
+
+#### 2. Streaming (Continuous)
+A peer-to-peer pattern where data is passed to the application immediately upon arrival, bypassing the need for a large reassembly buffer.
+*   **Memory Efficiency**: Allows processing infinite data using only a single packet-sized RAM footprint.
+*   **Directionality**: Any node can act as the **Source** (sender) or **Sink** (receiver).
+*   **Termination**:
+    *   **Source-side**: Setting the `IsLast` bit (L6) on the final fragment.
+    *   **Sink-side**: Sending a `NACK` (L5) to force the Source to stop.
+*   **API Pattern**: `TheStack.openStream(target, serviceID)`
 
 ### Reserved Service IDs
-(Table moved here: 0x00 Discovery, 0x7F System)
+To ensure interoperability, specific Service IDs are standard across the `microcomm` ecosystem:
+
+| ID | Name | Description |
+| :--- | :--- | :--- |
+| `0x00` | **Discovery** | Dynamic address resolution and capabilities exchange. |
+| `0x7F` | **System** | Opcodes: `0x01` (Reset), `0x02` (Bootloader), `0x03` (Time Sync - 4-byte Unix Timestamp). |
+| `0x01-0x7E` | **User Defined** | Available for custom application logic. |
 
 ### Reliability Best Practice (State vs. Action)
-(Best practices moved here)
+For critical controls, developers SHOULD use **State-based commands** (e.g., `SET_STATE(OPEN)`) rather than **Action-based commands** (e.g., `TOGGLE`). Combining state-based commands with **Queryable State** (`GET_STATUS`) ensures logical "Exactly-Once" behavior even across node reboots or catastrophic packet loss.
 
 ---
 
@@ -250,8 +271,8 @@ This protocol relies on a "Single Active Session" model to minimize RAM usage. T
 | **Packet Loss** | **L5** (Reliability)| ACKs and Retries ensure delivery. |
 
 ### Session Lifecycle Rules
-1.  **Handshake (Implicit)**: A session is initiated when a Server receives a `DATA` packet with **Index 0** (L6) and the **REQUEST** bit set (L7). There is no dedicated "Handshake" packet type; the first data fragment *is* the handshake.
-2.  **Locking**: Upon accepting a valid session start, the Server locks itself to the Client's Layer 3 address. Other clients attempting to connect during this window will receive a `BUSY` (L5) response.
+1.  **Handshake (Implicit)**: A session is initiated when a Server receives a packet with the **IsStateful** bit set (L8) and the **REQUEST** bit set in the subsequent L7 header.
+2.  **Locking**: Upon accepting a valid stateful session, the Server locks itself to the Client's Layer 3 address. Other clients attempting to connect during this window will receive a `BUSY` (L5) response.
 3.  **Watchdog (Zombie Protection)**: 
     *   Since the server ignores other clients while locked, a client crashing mid-session acts as a Denial-of-Service.
     *   The `SESSION_TIMEOUT` must be checked via interrupts or every loop cycle, not just on packet arrival.
