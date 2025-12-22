@@ -9,70 +9,50 @@ This document defines the **microcomm** protocol, a modular, hardware-agnostic c
 *   **Resource Priority**: Reliability > Memory Efficiency > Throughput.
 *   **Deterministic**: Behavior must be predictable even under heavy interference or load.
 
-## Modular Architecture (Pay-As-You-Go)
-**microcomm** is designed as a vertical stack where each layer is independent. Developers should only implement up to the layer required for their specific use case to minimize RAM and Flash footprint.
+## Modular Architecture (The Solid Pipe)
+**microcomm** is designed as a fixed vertical stack. Every packet logically traverses all layers (`L1 → L8`). To maintain efficiency, layers can be **Transparent (Pass-Through)**, meaning they add zero bytes of overhead to the wire and perform no logic in software for that specific packet.
 
-*   **L1-L3 (Addressing Only)**: Best for simple "fire-and-forget" beacons or sensors where data loss is acceptable.
-*   **L1-L5 (Reliable Datagrams)**: Best for simple remote triggers or status updates that fit in a single packet (no fragmentation).
-*   **L1-L7 (Full Stack)**: Required for large data transfers (firmware, logs) or complex request/response interactions.
-
-**Note**: If a layer is omitted, the headers for the subsequent layers are shifted up. For example, if L4 (Security) is disabled, the L5 header immediately follows the L3 header.
+*   **L1-L3 (Addressing)**: Mandatory for all networked communication.
+*   **L4 (Security)**: Transparent if encryption is disabled.
+*   **L5-L6 (Transport)**: Manages reliability and fragmentation. L6 is transparent for single-packet messages.
+*   **L7 (Session)**: Manages exclusive access (Locking) and Interaction Patterns. Transparent for stateless commands.
+*   **L8 (Application)**: The final routing destination (ServiceID).
 
 ---
 
-## 0. Global Configuration
-The stack is customized at compile-time using the following parameters:
-
-| Parameter | Type | Description |
-| :--- | :--- | :--- |
-| `PHYS_MTU` | `size_t` | The hardware packet limit (e.g., 32 for nRF24, 255 for LoRa, 1024 for Serial). |
-| `ADDR_TYPE` | `type` | `uint8_t` (255 nodes) or `uint16_t` (65k nodes). |
-| `L2_INTEGRITY` | `policy` | `CRC16`, `CRC32`, or `NONE` (No-Op). |
-| `L4_CRYPTO` | `policy` | Custom implementation overhead (adds X bytes for IV/Tags). |
-| `L5_RELIABLE` | `policy` | Defines retry limits and ACK timing. |
-| `SESSION_TIMEOUT`| `ms` | Time before an inactive session is forcibly unlocked (default: 2000ms). |
-| `ENDIANNESS` | `const` | **Little Endian** is mandatory for all multi-byte fields (CRC, Counters, etc.), including payloads for **Reserved Services** (0x00, 0x7F). The **4-byte UID** is treated as a 32-bit Little Endian integer. |
-
-### Timeout & Retry Guidelines
-To ensure responsiveness on high-latency mediums (like LoRa) while remaining snappy on fast mediums (like nRF24), use the following calculation:
-*   **Base Timeout**: `(Time_to_send_MTU * 2) + Processing_Latency`.
-*   **nRF24 Example**: ~10–20ms.
-*   **LoRa Example**: ~500–2000ms.
-*   **Serial (115200)**: ~5–10ms.
-*   **Infrared (2400 baud)**: ~100–300ms.
-*   **Rule**: `SESSION_TIMEOUT` should always be significantly larger than `Base_Timeout * MAX_RETRIES`.
-
 ## Detailed Packet Structure (On-the-Wire)
 
-This diagram illustrates the full overhead for a **Reliable Data Packet** (L5 + L6 + L7).
+This diagram illustrates the full overhead for a **Reliable Session Packet** (L1-L8).
 
 ```
 [ L1 PHYS ... ] 
       |
       +-- [ L3 Addressing (2 bytes) ]
             |
-            +-- [ L4 Security (Optional IV/Tag) ]
+            +-- [ L4 Security (Optional IV/Tag Wrapper) ]
                   |
                   +-- [ L5 Reliability (1 byte) ]
                   |     [ Type:2 | ID:6 ]
                   |
-                  +-- [ L6 Fragmentation (2 bytes) ]
-                        |     [ Index:8 | Control:8 ]
+                  +-- [ L6 Fragmentation (Optional 2 bytes) ]
+                  |     [ Index:8 | Control:8 ]
+                  |
+                  +-- [ L7 Session (Optional 1 byte) ]
+                  |     [ Pattern:2 | CMD:1 | Status:5 ]
+                  |
+                  +-- [ L8 Application (1 byte) ]
+                        |     [ ServiceID:7 | IsStateful:1 ]
                         |
-                        +-- [ L7 Payload (Variable) ]
+                        +-- [ L7/L8 Payload (Variable) ]
                               |
                               +-- [ L2 Integrity (Optional 2-byte Trailer) ]
 ```
 
-### Layer 7 Header Specification
-To ensure interoperability, the first payload byte of **Index 0** (the first fragment) is reserved for the **L7 Header**.
-
-*   **Structure**: `[ CMD: 1 bit | ServiceID: 7 bits ]`
-    *   **CMD Bit (0)**: `REQUEST` - Client is asking for data/action.
-    *   **CMD Bit (1)**: `RESPONSE` - Server is replying.
-    *   **Service ID**: The target endpoint (0x00-0x7F).
-
-**Note**: For **Atomic Responses**, the first byte of the application payload MUST be the **Status Code** (0x00 = Success). This ensures the client can distinguish between a successful transport and a successful application command.
+### Layer 8/7 Header Logic (Wire Efficiency)
+To save bytes, Layer 7 (Session) and Layer 8 (Application) share a signaling bit. 
+*   **L8 Byte**: `[ ServiceID: 7 bits | IsStateful: 1 bit ]`
+*   **If IsStateful = 0**: Layer 7 is **Transparent**. The payload follows immediately.
+*   **If IsStateful = 1**: Layer 7 is **Active**. The next byte is the L7 Header.
 
 ### Layer 6 Stream Behavior
 *   **Atomic Mode**: `Index` MUST NOT wrap. Maximum message size is `255 * Payload_Size`.
@@ -130,6 +110,7 @@ Provides source and destination filtering.
 
 ## Layer 4: Security Layer (Pluggable)
 Provides **Confidentiality**, **Authenticity**, and **Replay Protection**.
+*   **Wrapper Model**: Layer 4 acts as a secure container for the upper stack. It **MUST** encrypt the entirety of the L5, L6, and L7 headers and payloads. This ensures that metadata (like Service IDs or Packet IDs) is hidden from eavesdroppers.
 *   **Confidentiality**: Encrypts the payload so observers cannot read command data.
 *   **Replay Protection**: The cryptographic implementation **MUST** ensure freshness (e.g., using a Monotonic Counter, Timestamp, or Rolling Nonce) to reject recorded traffic.
 *   **Integrity**: Prevents malicious tampering (unlike L2, which only catches noise).
@@ -168,56 +149,43 @@ Handles the transport of payloads larger than the available MTU.
 
 ---
 
-## Layer 7: Session & Application Layer
-The top-level developer interface. Manages exclusive access (Locking) and Service routing.
+## Layer 7: Session Layer
+The management layer responsible for the lifecycle of a conversation. It is **Transparent** unless the `IsStateful` bit in L8 is set.
+
+### Session Control Header
+When active, the L7 header (1 byte) follows the L8 header:
+*   **Pattern (2 bits)**:
+    *   `00`: **None** (Stateless/Datagram).
+    *   `01`: **Atomic** (Reassemble full message before notify).
+    *   `10`: **Stream** (Pass fragments to app immediately).
+*   **CMD (1 bit)**: `0` for REQUEST, `1` for RESPONSE.
+*   **Status/Reserved (5 bits)**: Reserved for future control signals or internal session status.
 
 ### Session Model & Memory Management
-To survive on the smallest microcontrollers, Layer 7 enforces a strict memory and concurrency model:
+*   **Single Active Session**: To prevent memory exhaustion, a server **MUST** handle only one stateful client at a time, locking itself to that source address until completion or timeout.
+*   **Static Allocation**: The layer must be implementable without `malloc`, using a fixed-size session state block.
 
-*   **Single Active Session (Hardware Reality)**: Microcontrollers typically lack the RAM to manage multiple simultaneous reassembly buffers. To prevent memory exhaustion, a server **MUST** handle only one client at a time, locking itself to that source address until completion or timeout.
-*   **Static Allocation (No Heap)**: For mission-critical reliability, the protocol is designed to be implemented without dynamic memory allocation (`malloc`/`new`). This prevents runtime crashes due to heap fragmentation.
+---
 
-### Services & Service IDs
-A **Service** represents a specific logical endpoint or functional module on a device (e.g., a "Temperature Sensor" service, a "Motor Control" service, or a "System Settings" service).
+## Layer 8: Application Layer
+The final destination. Responsible for routing data to the correct functional handler.
 
-The **Service ID** is a 7-bit identifier (0x00 - 0x7F) that acts as a "port number" to route incoming requests to the correct application-level handler.
-
-#### Reserved Service IDs
-To ensure interoperability, specific Service IDs are standard across the `microcomm` ecosystem:
-
-| ID | Name | Description |
-| :--- | :--- | :--- |
-| `0x00` | **Discovery** | Dynamic address resolution and capabilities exchange. |
-| `0x7F` | **System** | Opcodes: `0x01` (Reset), `0x02` (Bootloader), `0x03` (Time Sync - 4-byte Unix Timestamp). |
-| `0x01-0x7E` | **User Defined** | Available for custom application logic. |
+*   **Header (1 byte)**: `[ ServiceID: 7 bits | IsStateful: 1 bit ]`
+*   **ServiceID**: Target endpoint (0x00 - 0x7F).
+*   **IsStateful**: If `1`, the next byte is the **Layer 7 Session Header**.
 
 ### Interaction Patterns
+(Patterns moved here: Atomic, Streaming, etc.)
 
-#### 1. Atomic (Request/Response)
-The stack reassembles all fragments into a single buffer before notifying the application.
-* **Best for**: Commands, settings, and small status updates.
-* **Overflow Protection**: If a receiver detects that an incoming message will exceed its **Max Buffer Size**, it **MUST** send a `NACK` (L5) immediately to terminate the session and prevent memory corruption.
-* **Status Codes**: The first byte of a **RESPONSE** payload `SHOULD` be a Status Code (e.g., `0x00` for Success, `0x01` for Invalid Command, `0x02` for Unauthorized). This allows the application to report logical errors even if the transport was successful.
-* **Reliability Best Practice (State vs. Action)**: For critical controls, developers SHOULD use **State-based commands** (e.g., `SET_STATE(OPEN)`) rather than **Action-based commands** (e.g., `TOGGLE`). Combining state-based commands with **Queryable State** (`GET_STATUS`) ensures logical "Exactly-Once" behavior even across node reboots or catastrophic packet loss.
-* **API Pattern**: `TheStack.request(target, serviceID, payload, length)`
+### Reserved Service IDs
+(Table moved here: 0x00 Discovery, 0x7F System)
 
-#### 2. Streaming (Continuous)
-A peer-to-peer pattern where data is passed to the application immediately upon arrival, bypassing the need for a large reassembly buffer.
-*   **Memory Efficiency**: Crucial for memory-constrained boards; allows processing infinite data (e.g., audio/firmware) using only a single packet-sized RAM footprint.
-*   **Directionality**: Any node (Client or Server) can act as the **Source** (sender) or **Sink** (receiver).
-*   **Termination**:
-    *   **Source-side**: The Source terminates the stream by setting the `IsLast` bit (L6) on the final fragment.
-    *   **Sink-side**: The Sink may terminate the stream at any time by sending a `NACK` (L5). The Source MUST immediately stop transmitting fragments upon receipt of a `NACK` during a stream.
-*   **Best for**: Logs, telemetry, audio, and large file transfers.
-*   **API Pattern**: `TheStack.openStream(target, serviceID)` -> Returns a `Stream` object.
+### Reliability Best Practice (State vs. Action)
+(Best practices moved here)
 
-### Power Management Models
-`microcomm` supports two primary models for interacting with energy-constrained devices:
+---
 
-1. **Server-Push (Always-On)**: The standard model where the Server listens indefinitely for requests. Lowest latency, but consumes the most power (~13mA for nRF24 RX).
-2. **Client-Pull (Beaconing)**: Optimized for battery-powered nodes. The node (Server) sleeps, wakes up periodically, sends a "Ready" beacon to its Hub (Client), and listens for a short window (e.g., 20ms) for any pending commands. This allows for multi-year battery life at the cost of higher command latency.
-
-### Discovery & Service Mapping (Service 0x00)
+## Discovery & Service Mapping (Service 0x00)
 **The Problem**: In traditional embedded networking, destination addresses are often hardcoded into firmware (e.g., `#define HUB_ADDRESS 0x02`). This makes systems fragile: if a Hub is replaced, every sensor in the building must be re-flashed. It also prevents "off-the-shelf" deployment where a user can simply power on a new device and have it work instantly.
 
 **The Solution**: `microcomm` provides a dynamic discovery mechanism that allows nodes to find their servers at runtime, enabling zero-configuration deployment and "hot-swappable" hardware.
@@ -233,24 +201,24 @@ In large deployments where multiple nodes interact simultaneously, collisions ar
 *   **L3 Dest**: `0xFF` (or `0xFFFF`)
 *   **L3 Src**: `0x00` (Unassigned)
 *   **Payload**:
+    *   **Opcode**: `0x01` (SEARCH).
     *   **Device Type**: A 1-byte category identifier.
     *   **UID**: A 4-byte Unique Identifier.
     *   **Client MTU**: The maximum buffer size of the Client.
-    *   **Required Capabilities**: A 1-byte bitmask of features the Server **MUST** support to respond:
-        *   **Bit 0**: Security (L4).
-        *   **Bit 1**: Streaming (L7).
-        *   **Bit 2**: Fragmentation (L6).
-        *   **Bit 3-7**: Reserved.
+    *   **Required Capabilities**: A 1-byte bitmask of features the Server **MUST** support.
 
 **B. Offer (Server -> Client)**
-*   **L3 Dest**: Unicast to the Client's UID/temporary address.
+*   **L3 Dest**: `0x00` (Unassigned).
+*   **Reliability**: The `OFFER` **MUST NOT** use Layer 5 Reliability (ACKs). If the Client fails to receive the offer, it will retry the `SEARCH` via its backoff timer.
+*   **Security**: Discovery packets **SHOULD** be transmitted in **Plaintext** (L4 disabled) to allow new nodes to join before a security session is established.
 *   **Payload**:
-    *   **Assigned Address**: The Logical Address the Client **MUST** use for all future transmissions to this Server.
+    *   **Opcode**: `0x02` (OFFER).
+    *   **Assigned Address**: The Logical Address the Client **MUST** use.
     *   **Protocol Version**: A 1-byte version identifier (e.g., `0x01`).
-    *   **Heartbeat Interval**: A 1-byte value (in seconds) representing how often the node will send a "Keep-Alive". A value of `0` disables heartbeats.
-    *   **Max Buffer Size**: The total RAM (in bytes) available for Atomic reassembly. Senders **MUST NOT** exceed this size for multi-fragment messages.
+    *   **Heartbeat Interval**: A 1-byte value (in seconds).
+    *   **Max Buffer Size**: The total RAM (in bytes) available for Atomic reassembly.
     *   **Server Capabilities**: A bitmask of supported layers and features.
-    *   **MTU**: The Server's maximum buffer size. The Client **MUST** use the minimum of its own MTU and the Server's MTU for this session.
+    *   **MTU**: The Server's maximum buffer size.
     *   **Target UID**: Echoed to confirm the recipient.
 
 **C. Association (Client Logic)**
@@ -261,8 +229,8 @@ Upon receiving an Offer, the Client **MUST** verify that the `Target UID` in the
 
 #### 3. Capability Discovery (GET_SERVICES)
 Once a basic association is formed, a Client may query the Server for its specific capabilities.
-*   **Request**: A `DATA` packet to Service `0x00` with an empty payload or a specific "GET_SERVICES" opcode.
-*   **Response**: A list of 2-byte pairs: `[ServiceID:8][ServiceType:8]`.
+*   **Request**: A `DATA` packet to Service `0x00` with payload `[Opcode:0x03]`.
+*   **Response**: A `DATA` packet with payload `[Opcode:0x04][Count:N][ServiceID_1][ServiceType_1]...`.
 *   **Keep-Alive (Heartbeat)**: Nodes supporting heartbeats transmit a `DATA` packet to Service `0x00` with a 1-byte payload of `0xFE`. If the Hub (Client) fails to receive this for 2x the negotiated interval, the node is considered offline.
 *   **Benefit**: Allows a Hub to automatically configure a dashboard or logic for a new device without manual setup.
 
@@ -319,7 +287,7 @@ sequenceDiagram
 *   **L3**: Src=`0x01`, Dst=`0x02`
 *   **L5**: Type=`DATA` (00), ID=`0x15` (Random start) -> Byte `0x15`
 *   **L6**: Index=`0`, Control=`IsLast` (0x01) -> Bytes `00 01`
-*   **L7**: Service=`0x01`, Cmd=`REQ` (0) -> Byte `0x01`
+*   **L8**: Service=`0x01`, Stateful=`0` -> Byte `0x02` (00000010)
 *   **Payload**: "PING" -> `50 49 4E 47`
 
 **Packet Hex Dump (12 bytes total):**
@@ -327,7 +295,7 @@ sequenceDiagram
 01 02       (L3 Header)
 15          (L5 Header)
 00 01       (L6 Header)
-01          (L7 Header)
+02          (L8 Header - Stateless)
 50 49 4E 47 (Payload "PING")
 A1 B2       (L2 CRC16 - Example)
 ```
@@ -336,7 +304,7 @@ A1 B2       (L2 CRC16 - Example)
 Server acknowledges the L5 packet immediately.
 *   **L3**: Src=`0x02`, Dst=`0x01`
 *   **L5**: Type=`ACK` (01), ID=`0x15` -> Byte `0x55` (01010101)
-*   **L6/L7**: (Empty/None)
+*   **L6/L8**: (Transparent/None)
 
 **Packet Hex Dump (5 bytes total):**
 ```
@@ -350,7 +318,7 @@ Server application processes "PING" and returns "PONG".
 *   **L3**: Src=`0x02`, Dst=`0x01`
 *   **L5**: Type=`DATA` (00), ID=`0x01` (Server's own sequence start)
 *   **L6**: Index=`0`, Control=`IsLast` (0x01)
-*   **L7**: Service=`0x01`, Cmd=`RESP` (1) -> Byte `0x81`
+*   **L8**: Service=`0x01`, Stateful=`0` -> Byte `0x02`
 *   **Payload**: `0x00` (Status: OK) + "PONG" -> `00 50 4F 4E 47`
 
 **Packet Hex Dump (13 bytes total):**
@@ -358,7 +326,7 @@ Server application processes "PING" and returns "PONG".
 02 01          (L3 Header)
 01             (L5 Header)
 00 01          (L6 Header)
-81             (L7 Header - RESP)
+02             (L8 Header - Stateless)
 00 50 4F 4E 47 (Status OK + Payload "PONG")
 E5 F6          (L2 CRC16 - Example)
 ```
