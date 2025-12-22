@@ -206,7 +206,7 @@ For critical controls, developers SHOULD use **State-based commands** (e.g., `SE
 
 ---
 
-## Discovery & Service Mapping (Service 0x00)
+### Discovery & Service Mapping (Service 0x00)
 **The Problem**: In traditional embedded networking, destination addresses are often hardcoded into firmware (e.g., `#define HUB_ADDRESS 0x02`). This makes systems fragile: if a Hub is replaced, every sensor in the building must be re-flashed. It also prevents "off-the-shelf" deployment where a user can simply power on a new device and have it work instantly.
 
 **The Solution**: `microcomm` provides a dynamic discovery mechanism that allows nodes to find their servers at runtime, enabling zero-configuration deployment and "hot-swappable" hardware.
@@ -226,7 +226,11 @@ In large deployments where multiple nodes interact simultaneously, collisions ar
     *   **Device Type**: A 1-byte category identifier.
     *   **UID**: A 4-byte Unique Identifier.
     *   **Client MTU**: The maximum buffer size of the Client.
-    *   **Required Capabilities**: A 1-byte bitmask of features the Server **MUST** support.
+    *   **Required Capabilities**: A 1-byte bitmask of features the Server **MUST** support:
+        *   **Bit 0**: Security (L4).
+        *   **Bit 1**: Streaming (L7).
+        *   **Bit 2**: Fragmentation (L6).
+        *   **Bit 3-7**: Reserved.
 
 **B. Offer (Server -> Client)**
 *   **L3 Dest**: `0x00` (Unassigned).
@@ -236,10 +240,10 @@ In large deployments where multiple nodes interact simultaneously, collisions ar
     *   **Opcode**: `0x02` (OFFER).
     *   **Assigned Address**: The Logical Address the Client **MUST** use.
     *   **Protocol Version**: A 1-byte version identifier (e.g., `0x01`).
-    *   **Heartbeat Interval**: A 1-byte value (in seconds).
-    *   **Max Buffer Size**: The total RAM (in bytes) available for Atomic reassembly.
+    *   **Heartbeat Interval**: A 1-byte value (in seconds) representing how often the node will send a "Keep-Alive". A value of `0` disables heartbeats.
+    *   **Max Buffer Size**: The total RAM (in bytes) available for Atomic reassembly. Senders **MUST NOT** exceed this size for multi-fragment messages.
     *   **Server Capabilities**: A bitmask of supported layers and features.
-    *   **MTU**: The Server's maximum buffer size.
+    *   **MTU**: The Server's maximum buffer size. The Client **MUST** use the minimum of its own MTU and the Server's MTU for this session.
     *   **Target UID**: Echoed to confirm the recipient.
 
 **C. Association (Client Logic)**
