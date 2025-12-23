@@ -323,3 +323,5 @@ This protocol relies on a "Single Active Session" model to minimize RAM usage. T
 *   [Appendix A: Example Transaction](appendix_a.md)
 *   [Appendix B: nRF24L01+ Implementation](appendix_b.md)
 *   [Appendix C: Service Discovery & Broadcast](appendix_c.md)
+*   [Appendix D: Session State Machine](appendix_d.md)
+*   [Appendix E: CRC Implementation Reference](appendix_e.md)
